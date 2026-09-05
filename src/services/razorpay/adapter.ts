@@ -15,6 +15,8 @@
 
 import crypto from 'crypto';
 import Razorpay from 'razorpay';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 import {
   CreateOrderParams,
   RazorpayOrderResult,

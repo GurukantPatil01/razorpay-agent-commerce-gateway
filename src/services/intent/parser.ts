@@ -73,21 +73,31 @@ export function parsePurchaseIntent(
     // Deterministic rule-based extraction from natural language
     // 1. Budget extraction
     let maxAmountPaise: number | null = null;
-    const priceMatch = text.match(/(?:under|below|less than|within|max(?:imum)?)\s*(?:₹|rs\.?|inr)?\s*([0-9,]+)(?:\s*(?:k|thousand))?/i);
-    if (priceMatch) {
-      let numStr = priceMatch[1].replace(/,/g, '');
-      let val = parseFloat(numStr);
-      if (text.toLowerCase().includes('3k') || /3\s*k/i.test(text)) {
-        val = 3000;
-      } else if (/(\d+)\s*k/i.test(priceMatch[0])) {
-        val = val * 1000;
-      }
-      maxAmountPaise = Math.round(val * 100);
-    } else if (text.includes('3,000') || text.includes('3000')) {
+    
+    // Check for word numbers (e.g. "three thousand", "two thousand", "twenty five hundred")
+    if (/(?:under|below|less than|within|max(?:imum)?|around|about|approx(?:imately)?)\s*(?:₹|rs\.?|inr)?\s*(?:three thousand|3 thousand)/i.test(text)) {
       maxAmountPaise = 300000;
+    } else if (/(?:under|below|less than|within|max(?:imum)?|around|about|approx(?:imately)?)\s*(?:₹|rs\.?|inr)?\s*(?:two thousand|2 thousand)/i.test(text)) {
+      maxAmountPaise = 200000;
+    } else if (/(?:under|below|less than|within|max(?:imum)?|around|about|approx(?:imately)?)\s*(?:₹|rs\.?|inr)?\s*(?:twenty five hundred)/i.test(text)) {
+      maxAmountPaise = 250000;
+    } else {
+      const priceMatch = text.match(/(?:under|below|less than|within|max(?:imum)?|around|about|approx(?:imately)?)\s*(?:₹|rs\.?|inr)?\s*([0-9,]+)(?:\s*(?:k|thousand))?/i);
+      if (priceMatch) {
+        let numStr = priceMatch[1].replace(/,/g, '');
+        let val = parseFloat(numStr);
+        if (text.toLowerCase().includes('3k') || /3\s*k/i.test(text)) {
+          val = 3000;
+        } else if (/(\d+)\s*k/i.test(priceMatch[0])) {
+          val = val * 1000;
+        }
+        maxAmountPaise = Math.round(val * 100);
+      } else if (text.includes('3,000') || text.includes('3000')) {
+        maxAmountPaise = 300000;
+      }
     }
 
-    // 2. Delivery extraction (ONLY IF EXPLICITLY REQUESTED)
+    // 2. Delivery extraction (ONLY IF EXPLICITLY REQUESTED WITH SPECIFIC TIMEFRAME)
     let maxDeliveryDays: number | null = null;
     const deliveryMatch = text.match(/(?:within|in|under|delivery\s*(?:within|in)?)\s*(\d+)\s*(?:days?|d)/i);
     if (deliveryMatch) {
@@ -96,19 +106,34 @@ export function parsePurchaseIntent(
 
     // 3. Return extraction (ONLY IF EXPLICITLY REQUESTED)
     let minimumReturnDays: number | null = null;
-    const returnMatch = text.match(/(?:at least|minimum|min)?\s*(?:a\s+)?(\d+)\s*[- ]?(?:days?|d)\s*returns?/i);
-    if (returnMatch) {
-      minimumReturnDays = parseInt(returnMatch[1], 10);
+    if (/(?:at least|minimum|min)?\s*(?:a\s+)?week\s*(?:to\s+return|returns?)/i.test(text)) {
+      minimumReturnDays = 7;
+    } else {
+      const returnMatch = text.match(/(?:at least|minimum|min)?\s*(?:a\s+)?(\d+)\s*[- ]?(?:days?|d)\s*returns?/i);
+      if (returnMatch) {
+        minimumReturnDays = parseInt(returnMatch[1], 10);
+      }
     }
 
     // 4. Query extraction
     let query = 'keyboard';
-    if (text.toLowerCase().includes('wireless keyboard')) {
+    const lowerText = text.toLowerCase();
+    if (lowerText.includes('wireless keyboard')) {
       query = 'wireless keyboard';
-    } else if (text.toLowerCase().includes('keyboard')) {
+    } else if (lowerText.includes('mechanical keyboard')) {
+      query = 'mechanical keyboard';
+    } else if (lowerText.includes('keyboard')) {
       query = 'keyboard';
-    } else if (text.toLowerCase().includes('mouse')) {
+    } else if (lowerText.includes('wireless mouse') || lowerText.includes('mouse')) {
       query = 'mouse';
+    } else if (lowerText.includes('electronic accessory') || lowerText.includes('accessory')) {
+      query = 'accessory';
+    } else {
+      // General item extraction
+      const itemMatch = text.match(/(?:find|need|buy|get|show me)\s+(?:a|an|the|something)?\s*([a-zA-Z\s]+?)(?:\s+(?:under|below|around|within|with|that)|\.|\?|$)/i);
+      if (itemMatch && itemMatch[1].trim()) {
+        query = itemMatch[1].trim();
+      }
     }
 
     const validated = PurchaseIntentSchema.parse({

@@ -304,7 +304,7 @@ export class RazorpayAdapter {
   public async createRefund(params: CreateRefundParams): Promise<RazorpayRefundResult> {
     const { paymentId, amountPaise, notes = {}, receipt } = params;
 
-    if (this.isRealRazorpayConfigured && this.razorpayClient && !paymentId.startsWith('sim_')) {
+    if (this.isRealRazorpayConfigured && this.razorpayClient && paymentId && !paymentId.startsWith('sim_')) {
       const refundOptions: any = { notes };
       if (amountPaise) refundOptions.amount = amountPaise;
       if (receipt) refundOptions.receipt = receipt;

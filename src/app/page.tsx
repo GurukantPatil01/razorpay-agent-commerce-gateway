@@ -533,6 +533,7 @@ export default function RazorpayAgentCommerceGateway() {
               <button
                 onClick={() => {
                   handleResetCatalog();
+                  setDemoBannerMessage('🚀 Story 1: Happy Path. Discovering merchants, evaluating multi-constraint criteria, and constructing itemized Purchase Plan. Click [ APPROVE & PAY ] once ready.');
                   handleSendMessage('Find me the best wireless keyboard under ₹3,000 with delivery within 3 days and at least a 7-day return.');
                 }}
                 className="px-2.5 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border border-blue-500/30 rounded-md transition-colors font-medium flex items-center gap-1.5 cursor-pointer"
@@ -545,6 +546,7 @@ export default function RazorpayAgentCommerceGateway() {
               <button
                 onClick={() => {
                   handleResetCatalog();
+                  setDemoBannerMessage('⚠️ Story 2: Failure Recovery Flow. Once the Purchase Plan appears below, click [ ⚠️ Simulate Failure (Story 2) ] to watch the AI engine trigger recovery via alternative payment method with zero duplicate charges.');
                   handleSendMessage('Find me the best wireless keyboard under ₹3,000 with delivery within 3 days and at least a 7-day return.');
                 }}
                 className="px-2.5 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-md transition-colors font-medium flex items-center gap-1.5 cursor-pointer"

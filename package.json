@@ -1,0 +1,49 @@
+{
+  "name": "arc-merchant",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "facilitator": "tsx src/servers/facilitator.ts",
+    "mcp": "tsx src/servers/mcp.ts",
+    "setup-circle": "tsx scripts/setup-circle-entity.ts",
+    "agent:vercel": "tsx scripts/agent-vercel-demo.ts",
+    "agent:google": "tsx scripts/agent-google-demo.ts",
+    "wallet": "tsx scripts/wallet-cli.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^3.0.10",
+    "@ai-sdk/react": "^3.0.41",
+    "@circle-fin/developer-controlled-wallets": "^9.6.0",
+    "@google/genai": "^1.38.0",
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@x402/core": "^2.2.0",
+    "@x402/evm": "^2.2.0",
+    "@x402/next": "^2.2.0",
+    "ai": "^6.0.39",
+    "express": "^5.2.1",
+    "next": "16.1.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "viem": "^2.44.4",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "dotenv": "^17.2.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.3",
+    "tailwindcss": "^4",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}

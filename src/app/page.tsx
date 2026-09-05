@@ -107,6 +107,7 @@ export default function RazorpayAgentCommerceGateway() {
   const { messages, sendMessage, status, setMessages } = useChat();
   const [agentInput, setAgentInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastProcessedPlanIdRef = useRef<string | null>(null);
 
   // Fetch Gateway Status & Metrics
   const fetchStatus = async () => {
@@ -136,29 +137,29 @@ export default function RazorpayAgentCommerceGateway() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Intercept approval card in assistant messages
+  // Intercept approval card in the latest assistant message
   useEffect(() => {
-    for (const msg of messages) {
-      if (msg.role === 'assistant') {
-        for (const part of msg.parts) {
-          if (part.type === 'text' && part.text.includes('```approval-card')) {
-            try {
-              const jsonStr = part.text.split('```approval-card')[1].split('```')[0].trim();
-              const parsed = JSON.parse(jsonStr);
-              if (parsed.purchaseRequestId && (!activeApproval || activeApproval.purchaseRequestId !== parsed.purchaseRequestId)) {
-                setActiveApproval(parsed);
-                setApprovalStatus('PENDING');
-                setPaymentResult(null);
-                setErrorMessage(null);
-              }
-            } catch {
-              // Ignore partial JSON streaming
-            }
+    const latestAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    if (!latestAssistant) return;
+
+    for (const part of latestAssistant.parts) {
+      if (part.type === 'text' && part.text.includes('```approval-card')) {
+        try {
+          const jsonStr = part.text.split('```approval-card')[1].split('```')[0].trim();
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.purchaseRequestId && parsed.purchaseRequestId !== lastProcessedPlanIdRef.current) {
+            lastProcessedPlanIdRef.current = parsed.purchaseRequestId;
+            setActiveApproval(parsed);
+            setApprovalStatus('PENDING');
+            setPaymentResult(null);
+            setErrorMessage(null);
           }
+        } catch {
+          // Ignore partial JSON streaming
         }
       }
     }
-  }, [messages, activeApproval]);
+  }, [messages]);
 
   // 1. Submit User Query
   const handleSendMessage = (textToSend?: string) => {

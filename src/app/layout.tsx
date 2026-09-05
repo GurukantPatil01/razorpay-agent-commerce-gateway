@@ -13,15 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Arc Merchant - x402 Payments for AI Agents",
-  description: "Full end-to-end agentic commerce on Arc. Sell content to AI agents, get paid in USDC via x402. Watch payments land on-chain in real time.",
-  icons: {
-    icon: "/arc-merchant-logo.png",
-    apple: "/arc-merchant-logo.png",
-  },
-  openGraph: {
-    images: ["/arc-merchant-logo.png"],
-  },
+  title: "RazorPay Commerce Gateway — Controlled Agentic Payments",
+  description: "Autonomous commerce infrastructure with deterministic pricing, human authorization gates, and Razorpay trust verification.",
 };
 
 export default function RootLayout({
@@ -31,9 +24,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-[#fafafa] text-zinc-900`}>
         {children}
       </body>
     </html>

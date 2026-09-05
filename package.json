@@ -15,7 +15,9 @@
     "wallet": "tsx scripts/wallet-cli.ts",
     "test:commerce": "tsx scripts/test-phase1-commerce.ts",
     "test:acceptance": "tsx scripts/test-acceptance-flow.ts",
-    "verify:razorpay": "tsx scripts/verify-real-razorpay-testmode.ts"
+    "test:reliability": "tsx scripts/test-phase2-reliability.ts",
+    "verify:razorpay": "tsx scripts/verify-real-razorpay-testmode.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.10",

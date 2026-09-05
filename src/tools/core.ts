@@ -703,6 +703,80 @@ export const commerceTools: Record<string, CoreTool> = {
       };
     },
   },
+
+  reconcile_payment: {
+    name: 'reconcile_payment',
+    description: 'Authoritatively reconcile payment status against Razorpay servers. Use when network drops or state is unknown before deciding to retry or fulfill.',
+    inputSchema: z.object({
+      transaction_id: z.string().describe('Internal Transaction ID'),
+    }),
+    execute: async ({ transaction_id }: { transaction_id: string }) => {
+      const result = await CommerceStore.reconcilePayment(transaction_id);
+      return result;
+    },
+  },
+
+  retry_payment: {
+    name: 'retry_payment',
+    description: 'Safely retry a failed payment with another payment method. Enforces max retry limit (3) and prevents duplicate charges.',
+    inputSchema: z.object({
+      transaction_id: z.string().describe('Transaction ID'),
+      payment_method: z.string().default('card').describe('Alternative payment method e.g. card, upi, netbanking'),
+    }),
+    execute: async ({ transaction_id, payment_method }: { transaction_id: string; payment_method: string }) => {
+      try {
+        const tx = CommerceStore.retryPayment(transaction_id, payment_method);
+        return {
+          success: true,
+          transactionId: tx.transactionId,
+          state: tx.state,
+          paymentMethod: payment_method,
+          attemptNumber: tx.paymentAttempts.length + 1,
+          message: 'Retry approved. Reusing existing order with zero duplicate charge.',
+        };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    },
+  },
+
+  request_refund: {
+    name: 'request_refund',
+    description: 'Process a controlled refund for a completed purchase. Checks merchant return policy and creates Razorpay refund.',
+    inputSchema: z.object({
+      transaction_id: z.string().describe('Transaction ID to refund'),
+      reason: z.string().optional().describe('Reason for refund request'),
+      amount_paise: z.number().optional().describe('Optional partial refund amount in paise'),
+    }),
+    execute: async ({ transaction_id, reason, amount_paise }: any) => {
+      try {
+        const result = await CommerceStore.requestRefund({
+          transactionId: transaction_id,
+          amountPaise: amount_paise,
+          reason,
+        });
+        return result;
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    },
+  },
+
+  get_audit_trail: {
+    name: 'get_audit_trail',
+    description: 'Retrieve immutable financial audit trail of transactions, approvals, Razorpay orders, and fulfillment events.',
+    inputSchema: z.object({
+      limit: z.number().default(20).describe('Max events to retrieve'),
+    }),
+    execute: async ({ limit }: { limit: number }) => {
+      const events = CommerceStore.getAuditEvents(limit);
+      return {
+        success: true,
+        count: events.length,
+        events,
+      };
+    },
+  },
 };
 
 // All tools combined

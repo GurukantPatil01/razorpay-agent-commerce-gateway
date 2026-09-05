@@ -286,6 +286,12 @@ export class RazorpayAdapter {
    * Helper to generate a valid signature for the simulator
    */
   public generateSimulatedSignature(orderId: string, paymentId: string): string {
+    if (this.isRealRazorpayConfigured && !orderId.startsWith('sim_')) {
+      return crypto
+        .createHmac('sha256', this.keySecret)
+        .update(`${orderId}|${paymentId}`)
+        .digest('hex');
+    }
     return crypto
       .createHash('sha256')
       .update(`SIMULATED:${orderId}|${paymentId}`)
@@ -366,7 +372,148 @@ export class RazorpayAdapter {
       mode: 'SIMULATED_DEV_MODE',
     };
   }
+
+  /**
+   * 8. Verify Razorpay Webhook Signature (HMAC-SHA256, Constant-Time)
+   */
+  public verifyWebhookSignature(rawBody: string, signature: string): boolean {
+    const secret = this.webhookSecret || process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || '';
+    if (!secret || !signature) {
+      return false;
+    }
+
+    try {
+      const expectedSignature = crypto
+        .createHmac('sha256', secret)
+        .update(rawBody)
+        .digest('hex');
+
+      if (expectedSignature.length !== signature.length) {
+        return false;
+      }
+
+      return crypto.timingSafeEqual(
+        Buffer.from(expectedSignature, 'utf-8'),
+        Buffer.from(signature, 'utf-8')
+      );
+    } catch (err) {
+      console.error('Webhook signature verification error:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Helper to generate a valid webhook signature
+   */
+  public generateWebhookSignature(rawBody: string, customSecret?: string): string {
+    const secret = customSecret || this.webhookSecret || process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || '';
+    return crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('hex');
+  }
+
+  /**
+   * 9. Reconcile Payment State from Razorpay Server
+   * Queries Razorpay API to determine if a valid payment exists for an order.
+   */
+  public async reconcilePaymentState(
+    orderId: string,
+    paymentId?: string
+  ): Promise<{
+    status: 'CAPTURED' | 'FAILED' | 'NOT_FOUND' | 'AUTHORIZED';
+    paymentId?: string;
+    amount?: number;
+    captured: boolean;
+    errorDescription?: string;
+    mode: 'RAZORPAY_TEST_MODE' | 'SIMULATED_DEV_MODE';
+  }> {
+    if (this.isRealRazorpayConfigured && this.razorpayClient && !orderId.startsWith('sim_')) {
+      try {
+        if (paymentId && !paymentId.startsWith('sim_')) {
+          const payment = await this.razorpayClient.payments.fetch(paymentId);
+          if (payment.status === 'captured') {
+            return {
+              status: 'CAPTURED',
+              paymentId: payment.id,
+              amount: payment.amount,
+              captured: true,
+              mode: 'RAZORPAY_TEST_MODE',
+            };
+          } else if (payment.status === 'failed') {
+            return {
+              status: 'FAILED',
+              paymentId: payment.id,
+              amount: payment.amount,
+              captured: false,
+              errorDescription: payment.error_description || 'Payment was declined by bank',
+              mode: 'RAZORPAY_TEST_MODE',
+            };
+          }
+        }
+
+        // Query payments associated with the order
+        const paymentsResponse = await this.razorpayClient.orders.fetchPayments(orderId);
+        const paymentsList = paymentsResponse.items || [];
+
+        const capturedPayment = paymentsList.find((p: any) => p.status === 'captured');
+        if (capturedPayment) {
+          return {
+            status: 'CAPTURED',
+            paymentId: capturedPayment.id,
+            amount: capturedPayment.amount,
+            captured: true,
+            mode: 'RAZORPAY_TEST_MODE',
+          };
+        }
+
+        const failedPayment = paymentsList.find((p: any) => p.status === 'failed');
+        if (failedPayment) {
+          return {
+            status: 'FAILED',
+            paymentId: failedPayment.id,
+            amount: failedPayment.amount,
+            captured: false,
+            errorDescription: failedPayment.error_description || 'Payment was declined by bank',
+            mode: 'RAZORPAY_TEST_MODE',
+          };
+        }
+
+        return {
+          status: 'NOT_FOUND',
+          captured: false,
+          mode: 'RAZORPAY_TEST_MODE',
+        };
+      } catch (err: any) {
+        console.error(`Reconciliation error for order ${orderId}:`, err);
+        return {
+          status: 'NOT_FOUND',
+          captured: false,
+          errorDescription: err.message,
+          mode: 'RAZORPAY_TEST_MODE',
+        };
+      }
+    }
+
+    // Simulator mode fallback
+    if (paymentId && !paymentId.includes('fail')) {
+      return {
+        status: 'CAPTURED',
+        paymentId,
+        amount: 294900,
+        captured: true,
+        mode: 'SIMULATED_DEV_MODE',
+      };
+    }
+
+    return {
+      status: 'NOT_FOUND',
+      captured: false,
+      mode: 'SIMULATED_DEV_MODE',
+    };
+  }
 }
 
 // Export singleton instance
 export const razorpayAdapter = new RazorpayAdapter();
+

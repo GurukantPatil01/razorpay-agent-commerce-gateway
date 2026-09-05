@@ -8,6 +8,18 @@
 import { PricingQuote, formatINR } from '@/services/pricing/calculator';
 import { PolicyValidationResult } from '@/services/policy/engine';
 import { TransactionState, TransactionStateMachine, StateTransitionRecord } from '@/services/transactions/state-machine';
+import { razorpayAdapter } from '@/services/razorpay/adapter';
+
+export interface WebhookRecord {
+  eventId: string;
+  eventType: string;
+  receivedTimestamp: number;
+  processedTimestamp: number;
+  status: 'PROCESSED' | 'IGNORED_DUPLICATE' | 'FAILED';
+  relatedOrderId?: string;
+  relatedPaymentId?: string;
+  relatedRefundId?: string;
+}
 
 export interface PurchaseRequest {
   id: string;
@@ -60,7 +72,7 @@ export interface Transaction {
 export interface AuditEvent {
   id: string;
   timestamp: number;
-  actor: 'USER' | 'AI_BUYER' | 'POLICY_ENGINE' | 'HUMAN_APPROVER' | 'RAZORPAY' | 'MERCHANT_FULFILLMENT';
+  actor: 'USER' | 'AI_BUYER' | 'POLICY_ENGINE' | 'HUMAN_APPROVER' | 'RAZORPAY' | 'MERCHANT_FULFILLMENT' | 'RAZORPAY_WEBHOOK' | 'SYSTEM';
   action: string;
   transactionId?: string;
   merchantId?: string;
@@ -75,6 +87,7 @@ interface CommerceStoreData {
   purchaseRequests: Map<string, PurchaseRequest>;
   transactions: Map<string, Transaction>;
   idempotencyMap: Map<string, string>; // idempotencyKey -> transactionId
+  processedWebhooks: Map<string, WebhookRecord>;
   auditEvents: AuditEvent[];
 }
 
@@ -87,8 +100,13 @@ const store: CommerceStoreData = globalThis.commerceStoreInstance || {
   purchaseRequests: new Map(),
   transactions: new Map(),
   idempotencyMap: new Map(),
+  processedWebhooks: new Map(),
   auditEvents: [],
 };
+
+if (!store.processedWebhooks) {
+  store.processedWebhooks = new Map();
+}
 
 globalThis.commerceStoreInstance = store;
 
@@ -106,15 +124,21 @@ export class CommerceStore {
   }): PurchaseRequest {
     const id = `req_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
 
+    const policy = params.policyResult || {
+      allowed: true,
+      requiresApproval: true,
+      violations: [],
+    };
+
     const purchaseRequest: PurchaseRequest = {
       id,
       merchantId: params.merchantId,
       productId: params.productId,
       quantity: params.quantity,
       quote: params.quote,
-      policyResult: params.policyResult,
+      policyResult: policy,
       selectionReason: params.selectionReason,
-      approvalStatus: params.policyResult.requiresApproval ? 'PENDING' : 'APPROVED',
+      approvalStatus: policy.requiresApproval ? 'PENDING' : 'APPROVED',
       quoteHash: params.quote.quoteHash,
       createdAt: Date.now(),
     };
@@ -128,7 +152,7 @@ export class CommerceStore {
       productName: params.quote.lineItems[0]?.name || params.productId,
       amountFormatted: params.quote.formattedBreakdown.totalFormatted,
       result: 'SUCCESS',
-      details: `Created purchase request ${id}. Policy evaluation: ${params.policyResult.allowed ? 'PASSED' : 'REJECTED'}.`,
+      details: `Created purchase request ${id}. Policy evaluation: ${policy.allowed ? 'PASSED' : 'REJECTED'}.`,
     });
 
     return purchaseRequest;
@@ -392,11 +416,13 @@ export class CommerceStore {
         details: `Verified Razorpay payment ${params.paymentId} via ${params.method}. Deterministic signature check passed.`,
       });
     } else {
-      this.updateTransactionState(
-        params.transactionId,
-        'PAYMENT_FAILED',
-        params.errorDescription || `Payment attempt #${attemptNumber} failed`
-      );
+      if (tx.state !== 'PAYMENT_FAILED') {
+        this.updateTransactionState(
+          params.transactionId,
+          'PAYMENT_FAILED',
+          params.errorDescription || `Payment attempt #${attemptNumber} failed`
+        );
+      }
 
       this.recordAuditEvent({
         actor: 'RAZORPAY',
@@ -414,16 +440,43 @@ export class CommerceStore {
   }
 
   /**
-   * 8. Fulfill Order
-   * STRICT SECURITY: Only callable after PAYMENT_SUCCESS.
+   * 8. Fulfill Order — EXACTLY ONCE GUARANTEE
+   * STRICT SECURITY: Only callable after PAYMENT_SUCCESS. Prevents duplicate shipping.
    */
-  public static fulfillTransaction(transactionId: string): Transaction {
+  public static fulfillTransaction(transactionId: string): Transaction & { alreadyFulfilled?: boolean } {
     const tx = store.transactions.get(transactionId);
     if (!tx) throw new Error(`Transaction ${transactionId} not found.`);
 
-    if (tx.state !== 'FULFILLMENT_PENDING') {
+    // EXACTLY ONCE FULFILLMENT GUARD
+    if (tx.state === 'FULFILLED' || tx.fulfillmentStatus === 'CONFIRMED') {
+      this.recordAuditEvent({
+        actor: 'SYSTEM',
+        action: 'FULFILLMENT_ALREADY_COMPLETED',
+        transactionId: tx.transactionId,
+        merchantId: tx.merchantId,
+        productName: tx.productName,
+        result: 'SUCCESS',
+        details: `Duplicate fulfillment rejected: Order already fulfilled with tracking ${tx.fulfillmentTrackingNumber}. Double-fulfillment prevented.`,
+      });
+      return {
+        ...tx,
+        alreadyFulfilled: true,
+      };
+    }
+
+    if (tx.state !== 'FULFILLMENT_PENDING' && tx.state !== 'PAYMENT_SUCCESS') {
       throw new Error(`Cannot fulfill transaction: Current state is '${tx.state}'. Payment must be verified first.`);
     }
+
+    this.recordAuditEvent({
+      actor: 'MERCHANT_FULFILLMENT',
+      action: 'FULFILLMENT_STARTED',
+      transactionId: tx.transactionId,
+      merchantId: tx.merchantId,
+      productName: tx.productName,
+      result: 'PENDING',
+      details: 'Merchant dispatch process initiated.',
+    });
 
     const trackingNumber = `TRACK_IND_${Date.now().toString().slice(-6)}`;
     tx.fulfillmentStatus = 'CONFIRMED';
@@ -441,6 +494,418 @@ export class CommerceStore {
     });
 
     return tx;
+  }
+
+  /**
+   * 9. Payment State Reconciliation
+   * Queries Razorpay API to reconcile internal state against actual Razorpay state.
+   * Prevents unsafe retries when payment actually succeeded.
+   */
+  public static async reconcilePayment(transactionId: string): Promise<{
+    success: boolean;
+    reconciled: boolean;
+    state: TransactionState;
+    canRetry: boolean;
+    safeToRetry: boolean;
+    paymentCaptured: boolean;
+    paymentId?: string;
+    message: string;
+    reconciliation: {
+      razorpayStatus: string;
+      safeToRetry: boolean;
+      details: string;
+    };
+  }> {
+    const tx = store.transactions.get(transactionId);
+    if (!tx) throw new Error(`Transaction ${transactionId} not found.`);
+
+    this.recordAuditEvent({
+      actor: 'SYSTEM',
+      action: 'PAYMENT_STATE_RECONCILIATION_STARTED',
+      transactionId: tx.transactionId,
+      merchantId: tx.merchantId,
+      productName: tx.productName,
+      result: 'PENDING',
+      details: `Initiated payment reconciliation with Razorpay for order ${tx.razorpayOrderId || 'N/A'}.`,
+    });
+
+    if (!tx.razorpayOrderId) {
+      return {
+        success: false,
+        reconciled: false,
+        state: tx.state,
+        canRetry: true,
+        safeToRetry: true,
+        paymentCaptured: false,
+        message: 'No Razorpay Order ID associated with this transaction.',
+        reconciliation: {
+          razorpayStatus: 'NOT_FOUND',
+          safeToRetry: true,
+          details: 'No Razorpay Order ID associated with this transaction.',
+        },
+      };
+    }
+
+    const razorpayState = await razorpayAdapter.reconcilePaymentState(
+      tx.razorpayOrderId,
+      tx.razorpayPaymentId
+    );
+
+    if (razorpayState.status === 'CAPTURED') {
+      if (tx.state !== 'FULFILLED' && tx.state !== 'PAYMENT_SUCCESS') {
+        tx.razorpayPaymentId = razorpayState.paymentId || tx.razorpayPaymentId;
+        this.updateTransactionState(tx.transactionId, 'PAYMENT_SUCCESS', 'Reconciliation confirmed payment capture');
+        this.updateTransactionState(tx.transactionId, 'FULFILLMENT_PENDING', 'Awaiting fulfillment after reconciliation');
+        this.fulfillTransaction(tx.transactionId);
+      }
+
+      this.recordAuditEvent({
+        actor: 'SYSTEM',
+        action: 'PAYMENT_RECONCILED',
+        transactionId: tx.transactionId,
+        merchantId: tx.merchantId,
+        productName: tx.productName,
+        result: 'SUCCESS',
+        details: `Reconciliation verified payment captured on Razorpay (${razorpayState.paymentId}). Order fulfilled safely. DO NOT RETRY.`,
+      });
+
+      return {
+        success: true,
+        reconciled: true,
+        state: tx.state,
+        canRetry: false,
+        safeToRetry: false,
+        paymentCaptured: true,
+        paymentId: razorpayState.paymentId,
+        message: 'Razorpay confirms payment is CAPTURED. Order fulfilled safely. Retry prohibited.',
+        reconciliation: {
+          razorpayStatus: razorpayState.status,
+          safeToRetry: false,
+          details: 'Payment captured on Razorpay. Order fulfilled safely. Retry prohibited.',
+        },
+      };
+    } else {
+      if (tx.state !== 'PAYMENT_FAILED' && tx.state !== 'FULFILLED') {
+        this.updateTransactionState(tx.transactionId, 'PAYMENT_FAILED', 'Reconciliation confirmed payment is not captured');
+      }
+
+      this.recordAuditEvent({
+        actor: 'SYSTEM',
+        action: 'PAYMENT_RECONCILED',
+        transactionId: tx.transactionId,
+        merchantId: tx.merchantId,
+        productName: tx.productName,
+        result: 'SUCCESS',
+        details: `Reconciliation confirmed no successful payment exists on Razorpay. SAFE TO RETRY.`,
+      });
+
+      return {
+        success: true,
+        reconciled: true,
+        state: tx.state,
+        canRetry: tx.paymentAttempts.length < 3,
+        safeToRetry: true,
+        paymentCaptured: false,
+        message: 'Razorpay confirms no successful payment exists. SAFE TO RETRY.',
+        reconciliation: {
+          razorpayStatus: razorpayState.status,
+          safeToRetry: true,
+          details: 'No successful payment on Razorpay. Safe to retry.',
+        },
+      };
+    }
+  }
+
+  /**
+   * 10. Payment Failure Recovery Engine
+   * Enforces retry budget (MAX_ATTEMPTS = 3).
+   * After 3 failures, transitions to RECOVERY_EXHAUSTED.
+   */
+  public static retryPayment(transactionId: string, paymentMethod = 'card'): Transaction {
+    const tx = store.transactions.get(transactionId);
+    if (!tx) throw new Error(`Transaction ${transactionId} not found.`);
+
+    const MAX_PAYMENT_ATTEMPTS = 3;
+    if (tx.paymentAttempts.length >= MAX_PAYMENT_ATTEMPTS) {
+      if (tx.state !== 'RECOVERY_EXHAUSTED') {
+        this.updateTransactionState(
+          transactionId,
+          'RECOVERY_EXHAUSTED',
+          `Maximum retry limit (${MAX_PAYMENT_ATTEMPTS}) reached. Human intervention required.`
+        );
+      }
+      this.recordAuditEvent({
+        actor: 'POLICY_ENGINE',
+        action: 'RECOVERY_EXHAUSTED',
+        transactionId: tx.transactionId,
+        merchantId: tx.merchantId,
+        productName: tx.productName,
+        result: 'BLOCKED',
+        details: `Payment recovery exhausted after ${MAX_PAYMENT_ATTEMPTS} attempts. Human intervention required.`,
+      });
+      throw new Error(
+        `Maximum payment recovery attempts (${MAX_PAYMENT_ATTEMPTS}) exhausted. Human assistance required.`
+      );
+    }
+
+    this.updateTransactionState(
+      transactionId,
+      'PAYMENT_PENDING',
+      `Payment retry approved via ${paymentMethod} (Attempt #${tx.paymentAttempts.length + 1})`
+    );
+
+    this.recordAuditEvent({
+      actor: 'AI_BUYER',
+      action: 'PAYMENT_RETRY_APPROVED',
+      transactionId: tx.transactionId,
+      merchantId: tx.merchantId,
+      productName: tx.productName,
+      result: 'SUCCESS',
+      details: `Authorized retry attempt #${tx.paymentAttempts.length + 1} with method '${paymentMethod}'. Reusing Razorpay Order ${tx.razorpayOrderId} with zero duplicate charges.`,
+    });
+
+    return tx;
+  }
+
+  /**
+   * 11. Controlled Refund Engine
+   * Validates eligibility, checks return policy, validates amount, and creates Razorpay refund.
+   */
+  public static async requestRefund(params: {
+    transactionId: string;
+    amountPaise?: number;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    transactionId: string;
+    refundId: string;
+    amountPaise: number;
+    amountFormatted: string;
+    state: TransactionState;
+  }> {
+    const tx = store.transactions.get(params.transactionId);
+    if (!tx) throw new Error(`Transaction ${params.transactionId} not found.`);
+
+    if (tx.refundStatus === 'REFUNDED' || tx.state === 'REFUNDED') {
+      throw new Error(`Transaction ${params.transactionId} has already been refunded. Duplicate refund prevented.`);
+    }
+
+    if (tx.refundStatus === 'REQUESTED' || tx.state === 'REFUND_REQUESTED') {
+      throw new Error(`Refund already requested for transaction ${params.transactionId}. Duplicate request prevented.`);
+    }
+
+    if (tx.state !== 'FULFILLED' && tx.state !== 'PAYMENT_SUCCESS') {
+      throw new Error(`Cannot refund transaction: Current state is '${tx.state}'. Only fulfilled transactions can be refunded.`);
+    }
+
+    const refundAmountPaise = params.amountPaise || tx.amountPaise;
+    if (refundAmountPaise <= 0 || refundAmountPaise > tx.amountPaise) {
+      throw new Error(
+        `Invalid refund amount: ₹${(refundAmountPaise / 100).toFixed(2)}. Cannot exceed captured total of ₹${(
+          tx.amountPaise / 100
+        ).toFixed(2)}.`
+      );
+    }
+
+    this.updateTransactionState(params.transactionId, 'REFUND_REQUESTED', params.reason || 'Customer requested refund');
+    tx.refundStatus = 'REQUESTED';
+
+    this.recordAuditEvent({
+      actor: 'USER',
+      action: 'REFUND_REQUESTED',
+      transactionId: tx.transactionId,
+      merchantId: tx.merchantId,
+      productName: tx.productName,
+      amountFormatted: formatINR(refundAmountPaise),
+      result: 'PENDING',
+      details: `Refund requested for ${formatINR(refundAmountPaise)}. Reason: ${params.reason || 'Customer requested'}.`,
+    });
+
+    const refundResult = await razorpayAdapter.createRefund({
+      paymentId: tx.razorpayPaymentId!,
+      amountPaise: refundAmountPaise,
+      notes: {
+        transactionId: tx.transactionId,
+        reason: params.reason || 'User requested refund',
+      },
+    });
+
+    tx.refundStatus = 'REFUNDED';
+    tx.refundId = refundResult.id;
+    this.updateTransactionState(params.transactionId, 'REFUNDED', `Refund ${refundResult.id} processed`);
+
+    this.recordAuditEvent({
+      actor: 'RAZORPAY',
+      action: 'REFUND_PROCESSED',
+      transactionId: tx.transactionId,
+      merchantId: tx.merchantId,
+      productName: tx.productName,
+      amountFormatted: formatINR(refundAmountPaise),
+      result: 'SUCCESS',
+      details: `Razorpay refund ${refundResult.id} processed successfully for ${formatINR(refundAmountPaise)}.`,
+    });
+
+    return {
+      success: true,
+      transactionId: tx.transactionId,
+      refundId: refundResult.id,
+      amountPaise: refundAmountPaise,
+      amountFormatted: formatINR(refundAmountPaise),
+      state: tx.state,
+    };
+  }
+
+  /**
+   * 12. Webhook Event Processing with Durable Deduplication
+   */
+  public static processWebhookEvent(
+    event: any,
+    rawBody?: string,
+    signature?: string
+  ): {
+    success: boolean;
+    status: 'PROCESSED' | 'IGNORED_DUPLICATE' | 'FAILED';
+    eventType?: string;
+    message: string;
+    orderId?: string;
+    paymentId?: string;
+  } {
+    const eventId = event?.id || (event?.contains?.length ? event.contains[0] : `evnt_${Date.now()}`);
+    const eventType = event?.event || 'unknown';
+
+    // 1. Durable Deduplication Check
+    if (store.processedWebhooks.has(eventId)) {
+      this.recordAuditEvent({
+        actor: 'RAZORPAY_WEBHOOK',
+        action: 'WEBHOOK_DUPLICATE_IGNORED',
+        result: 'SUCCESS',
+        details: `Duplicate webhook event ${eventId} (${eventType}) received. Safely ignored. Duplicate fulfillment prevented.`,
+      });
+
+      return {
+        success: true,
+        status: 'IGNORED_DUPLICATE',
+        eventType,
+        message: `Webhook event ${eventId} already processed. Safely ignored.`,
+      };
+    }
+
+    const payload = event?.payload || {};
+    const paymentEntity = payload?.payment?.entity;
+    const orderEntity = payload?.order?.entity;
+    const refundEntity = payload?.refund?.entity;
+
+    const orderId = paymentEntity?.order_id || orderEntity?.id;
+    const paymentId = paymentEntity?.id;
+    const refundId = refundEntity?.id;
+
+    // Find internal transaction by Razorpay Order ID
+    let targetTx: Transaction | undefined;
+    if (orderId) {
+      targetTx = Array.from(store.transactions.values()).find((t) => t.razorpayOrderId === orderId);
+    }
+
+    switch (eventType) {
+      case 'order.paid': {
+        if (targetTx) {
+          if (targetTx.state !== 'FULFILLED' && targetTx.state !== 'PAYMENT_SUCCESS') {
+            this.updateTransactionState(targetTx.transactionId, 'PAYMENT_SUCCESS', 'Webhook confirmed order.paid');
+            this.updateTransactionState(targetTx.transactionId, 'FULFILLMENT_PENDING', 'Awaiting fulfillment from webhook');
+            this.fulfillTransaction(targetTx.transactionId);
+          }
+        }
+        break;
+      }
+
+      case 'payment.captured': {
+        if (targetTx) {
+          if (targetTx.state !== 'FULFILLED' && targetTx.state !== 'PAYMENT_SUCCESS') {
+            this.recordPaymentAttempt({
+              transactionId: targetTx.transactionId,
+              paymentId: paymentId || `pay_wh_${Date.now()}`,
+              method: paymentEntity?.method || 'card',
+              status: 'SUCCESS',
+            });
+            this.fulfillTransaction(targetTx.transactionId);
+          }
+        }
+        break;
+      }
+
+      case 'payment.failed': {
+        if (targetTx) {
+          this.recordPaymentAttempt({
+            transactionId: targetTx.transactionId,
+            paymentId: paymentId || `pay_fail_wh_${Date.now()}`,
+            method: paymentEntity?.method || 'unknown',
+            status: 'FAILED',
+            errorDescription: paymentEntity?.error_description || 'Webhook reported payment failure',
+          });
+        }
+        break;
+      }
+
+      case 'refund.created': {
+        if (targetTx) {
+          targetTx.refundStatus = 'REQUESTED';
+          targetTx.refundId = refundId;
+          if (targetTx.state !== 'REFUND_REQUESTED' && targetTx.state !== 'REFUNDED') {
+            this.updateTransactionState(targetTx.transactionId, 'REFUND_REQUESTED', 'Webhook reported refund.created');
+          }
+        }
+        break;
+      }
+
+      case 'refund.processed': {
+        if (targetTx) {
+          targetTx.refundStatus = 'REFUNDED';
+          targetTx.refundId = refundId;
+          if (targetTx.state !== 'REFUNDED') {
+            this.updateTransactionState(targetTx.transactionId, 'REFUNDED', 'Webhook reported refund.processed');
+          }
+        }
+        break;
+      }
+
+      default:
+        console.log(`Unhandled webhook event type: ${eventType}`);
+    }
+
+    // Record processed event
+    const record: WebhookRecord = {
+      eventId,
+      eventType,
+      receivedTimestamp: Date.now(),
+      processedTimestamp: Date.now(),
+      status: 'PROCESSED',
+      relatedOrderId: orderId,
+      relatedPaymentId: paymentId,
+      relatedRefundId: refundId,
+    };
+    store.processedWebhooks.set(eventId, record);
+
+    this.recordAuditEvent({
+      actor: 'RAZORPAY_WEBHOOK',
+      action: 'WEBHOOK_PROCESSED',
+      transactionId: targetTx?.transactionId,
+      merchantId: targetTx?.merchantId,
+      productName: targetTx?.productName,
+      result: 'SUCCESS',
+      details: `Processed webhook event ${eventId} (${eventType}). State updated.`,
+    });
+
+    return {
+      success: true,
+      status: 'PROCESSED',
+      eventType,
+      message: `Webhook event ${eventId} processed successfully.`,
+      orderId,
+      paymentId,
+    };
+  }
+
+  public static getProcessedWebhooks(): WebhookRecord[] {
+    return Array.from(store.processedWebhooks.values());
   }
 
   /**

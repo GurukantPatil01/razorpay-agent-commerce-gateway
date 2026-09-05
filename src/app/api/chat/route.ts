@@ -1,4 +1,4 @@
-import { streamText, convertToModelMessages, UIMessage, stepCountIs } from "ai";
+import { streamText, convertToModelMessages, UIMessage, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { google } from "@ai-sdk/google";
 import { vercelTools } from "@/tools/adapters/vercel";
 import { commerceTools } from "@/tools/core";
@@ -36,7 +36,25 @@ export async function POST(request: Request) {
 
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 
-  if (apiKey) {
+  // Extract prompt from latest user message across various UI message structures
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  let prompt = "";
+  if (lastUserMsg) {
+    if (Array.isArray(lastUserMsg.parts)) {
+      prompt = lastUserMsg.parts
+        .map((p: any) => (p.type === "text" ? p.text : typeof p === "string" ? p : ""))
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (!prompt && (lastUserMsg as any).content) {
+      prompt = typeof (lastUserMsg as any).content === "string"
+        ? (lastUserMsg as any).content
+        : JSON.stringify((lastUserMsg as any).content);
+    }
+  }
+
+  // Only invoke Google Gemini if a genuine AI Studio API key (starts with AIzaSy) is configured
+  if (apiKey && apiKey.startsWith("AIzaSy")) {
     try {
       const result = streamText({
         model: google("gemini-2.0-flash"),
@@ -53,9 +71,6 @@ export async function POST(request: Request) {
   }
 
   // Fallback Deterministic Agent Engine for offline/demo reliability
-  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
-  const prompt = lastUserMsg?.parts?.map((p: any) => (p.type === "text" ? p.text : "")).join(" ") || "";
-
   return handleDeterministicAgentFlow(prompt);
 }
 
@@ -146,18 +161,13 @@ Or test safety & failure recovery:
 * Test **Price Mutation Invalidation** protection`;
   }
 
-  const encoder = new TextEncoder();
-  const readableStream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode(`0:${JSON.stringify(streamContent)}\n`));
-      controller.close();
+  const stream = createUIMessageStream({
+    execute: ({ writer }) => {
+      writer.write({ type: "text-start", id: "agent_response_0" });
+      writer.write({ type: "text-delta", id: "agent_response_0", delta: streamContent });
+      writer.write({ type: "text-end", id: "agent_response_0" });
     },
   });
 
-  return new Response(readableStream, {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "X-Vercel-AI-Data-Stream": "v1",
-    },
-  });
+  return createUIMessageStreamResponse({ stream });
 }

@@ -160,7 +160,7 @@ export default function RazorpayAgentCommerceGateway() {
   // 1. Submit User Query
   const handleSendMessage = (textToSend?: string) => {
     const query = textToSend || agentInput;
-    if (!query.trim() || status !== 'ready') return;
+    if (!query.trim() || status === 'streaming') return;
     sendMessage({ text: query.trim() });
     setAgentInput('');
   };
@@ -641,28 +641,31 @@ export default function RazorpayAgentCommerceGateway() {
         {activeTab === 'buyer' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Chat Column */}
-            <div className="lg:col-span-7 flex flex-col bg-zinc-900/70 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl h-[720px]">
-              <div className="p-3.5 border-b border-zinc-800/80 bg-zinc-900 flex items-center justify-between">
+            <div className="lg:col-span-7 flex flex-col bg-zinc-900/70 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl h-[580px]">
+              <div className="p-3 border-b border-zinc-800/80 bg-zinc-900 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-blue-500" />
+                  <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
                   <span className="font-semibold text-sm text-white">AI Buyer Assistant</span>
                   <span className="text-[10px] font-mono bg-blue-950 border border-blue-800/50 text-blue-300 px-1.5 py-0.5 rounded">
                     🤖 AI Decision Layer
                   </span>
                 </div>
-                <span className="text-xs text-zinc-500 font-mono">Autonomous Multi-Merchant Search</span>
+                <span className="text-[11px] text-zinc-400 font-mono flex items-center gap-1">
+                  <span>Verified Merchants:</span>
+                  <span className="text-emerald-400 font-bold">4 Active</span>
+                </span>
               </div>
 
               {/* Messages Viewport */}
               <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
                 {messages.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center p-6 text-zinc-400">
-                    <div className="h-12 w-12 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-xl mb-3">
+                  <div className="h-full flex flex-col items-center justify-center text-center p-4 text-zinc-400">
+                    <div className="h-10 w-10 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-lg mb-2">
                       🤖
                     </div>
-                    <h3 className="font-semibold text-white text-base mb-1">RazorPay Agent Commerce Gateway</h3>
-                    <p className="text-xs max-w-md text-zinc-400 mb-4">
-                      I autonomously discover verified merchants, evaluate multi-constraint candidates, compute deterministic quotes, enforce buyer spending policy, and prepare Razorpay checkout.
+                    <h3 className="font-bold text-white text-sm mb-1">RazorPay Agent Commerce Gateway</h3>
+                    <p className="text-xs max-w-sm text-zinc-400 mb-3">
+                      Type your purchase requirements below or click a suggestion to trigger multi-merchant search, deterministic quote computation, and Razorpay checkout.
                     </p>
                     <div className="flex flex-wrap gap-2 justify-center max-w-md">
                       <button
@@ -671,9 +674,10 @@ export default function RazorpayAgentCommerceGateway() {
                             'Find me the best wireless keyboard under ₹3,000 with delivery within 3 days and at least a 7-day return.'
                           )
                         }
-                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium transition-all shadow-md cursor-pointer"
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium transition-all shadow-md cursor-pointer flex items-center gap-1.5"
                       >
-                        🚀 Primary Demo: Keyboard under ₹3,000
+                        <span>🚀</span>
+                        <span>Primary: Keyboard under ₹3,000</span>
                       </button>
                       <button
                         onClick={() =>
@@ -681,9 +685,10 @@ export default function RazorpayAgentCommerceGateway() {
                             'Find me a keyboard under ₹2,700 with delivery within 2 days.'
                           )
                         }
-                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded-lg text-xs font-medium transition-all cursor-pointer"
+                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5"
                       >
-                        ❌ Test Constraint Violation Rejection
+                        <span>❌</span>
+                        <span>Violation Rejection Test</span>
                       </button>
                     </div>
                   </div>
@@ -719,14 +724,57 @@ export default function RazorpayAgentCommerceGateway() {
                   <div className="flex justify-start">
                     <div className="bg-zinc-800/90 border border-zinc-700/60 rounded-xl px-4 py-2.5 text-xs text-blue-400 animate-pulse flex items-center gap-2">
                       <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-ping" />
-                      AI Buyer scoring multi-merchant catalog...
+                      AI Buyer discovering merchants & evaluating constraints...
                     </div>
                   </div>
                 )}
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* Chat Input */}
+              {/* Quick AI Suggestions Bar (Always Visible) */}
+              <div className="px-3 py-1.5 bg-zinc-900/95 border-t border-zinc-800/80 flex items-center gap-1.5 overflow-x-auto text-[11px]">
+                <span className="text-zinc-500 font-semibold whitespace-nowrap flex items-center gap-1">
+                  <span>💡</span> Suggestions:
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSendMessage('Find me the best wireless keyboard under ₹3,000 with delivery within 3 days and at least a 7-day return.')
+                  }
+                  className="whitespace-nowrap px-2.5 py-0.5 bg-blue-950/70 hover:bg-blue-900/80 text-blue-300 border border-blue-800/50 rounded-full transition-colors cursor-pointer"
+                >
+                  ⌨️ Keyboard under ₹3,000 (3d SLA)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSendMessage('Find me a fast delivery wireless keyboard under ₹2,800 within 2 days.')
+                  }
+                  className="whitespace-nowrap px-2.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 rounded-full transition-colors cursor-pointer"
+                >
+                  ⚡ Fast Delivery (&lt;2d)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSendMessage('Show me keyboards under ₹3,500 with at least 10 days return policy.')
+                  }
+                  className="whitespace-nowrap px-2.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 rounded-full transition-colors cursor-pointer"
+                >
+                  🛡️ 10-day Return Window
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSendMessage('Find me a keyboard under ₹2,000 with 1 day delivery.')
+                  }
+                  className="whitespace-nowrap px-2.5 py-0.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 rounded-full transition-colors cursor-pointer"
+                >
+                  ❌ Impossible Constraints
+                </button>
+              </div>
+
+              {/* Chat Input Form */}
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -743,7 +791,7 @@ export default function RazorpayAgentCommerceGateway() {
                 />
                 <button
                   type="submit"
-                  disabled={status !== 'ready' || !agentInput.trim()}
+                  disabled={status === 'streaming' || !agentInput.trim()}
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg font-medium text-xs text-white transition-all shadow-md cursor-pointer"
                 >
                   Send

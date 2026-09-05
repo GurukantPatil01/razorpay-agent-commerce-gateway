@@ -32,7 +32,7 @@ export async function GET() {
       onChainBalance = usdcBalance?.amount || '0';
 
       // Store both wallet and balance
-      setCachedBalance(onChainBalance, wallet.id, wallet.address);
+      setCachedBalance(onChainBalance || '0', wallet.id, wallet.address);
       merchantWallet = { id: wallet.id, address: wallet.address };
       console.log(`📊 Balance updated: $${onChainBalance}`);
     } catch (error) {

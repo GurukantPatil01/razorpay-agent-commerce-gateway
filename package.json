@@ -12,7 +12,9 @@
     "setup-circle": "tsx scripts/setup-circle-entity.ts",
     "agent:vercel": "tsx scripts/agent-vercel-demo.ts",
     "agent:google": "tsx scripts/agent-google-demo.ts",
-    "wallet": "tsx scripts/wallet-cli.ts"
+    "wallet": "tsx scripts/wallet-cli.ts",
+    "test:commerce": "tsx scripts/test-phase1-commerce.ts",
+    "test:acceptance": "tsx scripts/test-acceptance-flow.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.10",
@@ -20,12 +22,14 @@
     "@circle-fin/developer-controlled-wallets": "^9.6.0",
     "@google/genai": "^1.38.0",
     "@modelcontextprotocol/sdk": "^1.25.2",
+    "@next/swc-darwin-arm64": "^16.3.4",
     "@x402/core": "^2.2.0",
     "@x402/evm": "^2.2.0",
     "@x402/next": "^2.2.0",
     "ai": "^6.0.39",
     "express": "^5.2.1",
     "next": "16.1.3",
+    "razorpay": "^2.9.8",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-markdown": "^10.1.0",

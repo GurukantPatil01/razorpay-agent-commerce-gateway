@@ -14,17 +14,32 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: resolve(__dirname, '../../.env.local') });
 
-const apiKey = process.env.CIRCLE_API_KEY;
-const entitySecret = process.env.CIRCLE_ENTITY_SECRET;
+let _client: any = null;
 
-if (!apiKey || !entitySecret) {
-  throw new Error('Missing Circle credentials: CIRCLE_API_KEY and CIRCLE_ENTITY_SECRET required');
+export function getCircleClient(): any {
+  const apiKey = process.env.CIRCLE_API_KEY;
+  const entitySecret = process.env.CIRCLE_ENTITY_SECRET;
+
+  if (!apiKey || !entitySecret) {
+    throw new Error('Missing Circle credentials: CIRCLE_API_KEY and CIRCLE_ENTITY_SECRET required');
+  }
+
+  if (!_client) {
+    _client = initiateDeveloperControlledWalletsClient({
+      apiKey,
+      entitySecret,
+    });
+  }
+  return _client;
 }
 
-// Initialize Circle client
-export const circleClient = initiateDeveloperControlledWalletsClient({
-  apiKey,
-  entitySecret,
+// Lazy proxy that defers initialization until a method is actually invoked
+export const circleClient: any = new Proxy({}, {
+  get(_target, prop) {
+    const client = getCircleClient();
+    const value = client[prop];
+    return typeof value === 'function' ? value.bind(client) : value;
+  }
 });
 
 /**

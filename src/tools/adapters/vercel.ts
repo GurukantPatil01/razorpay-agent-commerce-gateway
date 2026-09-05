@@ -11,11 +11,11 @@
  */
 
 import { tool } from 'ai';
-import { arcTools } from '../core';
+import { allTools, arcTools, commerceTools } from '../core';
 
-// Convert core tools to Vercel AI SDK format
+// Convert all core tools (both commerce and legacy arc tools) to Vercel AI SDK format
 export const vercelTools = Object.fromEntries(
-  Object.entries(arcTools).map(([key, t]) => [
+  Object.entries(allTools).map(([key, t]) => [
     key,
     tool({
       description: t.description,
@@ -26,4 +26,5 @@ export const vercelTools = Object.fromEntries(
 );
 
 // Re-export for convenience
-export { arcTools } from '../core';
+export { allTools, arcTools, commerceTools } from '../core';
+

@@ -18,10 +18,10 @@
 
 import { z } from 'zod';
 import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { arcTools } from '../core.js';
+import { allTools } from '../core.js';
 
 // Convert core tools to MCP format using Zod 4's built-in z.toJSONSchema()
-export const mcpTools: Tool[] = Object.values(arcTools).map((t) => ({
+export const mcpTools: Tool[] = Object.values(allTools).map((t) => ({
   name: t.name,
   description: t.description,
   inputSchema: z.toJSONSchema(t.inputSchema) as Tool['inputSchema'],
@@ -31,7 +31,7 @@ export const mcpTools: Tool[] = Object.values(arcTools).map((t) => ({
  * Execute a tool and return MCP-formatted result
  */
 export async function executeTool(name: string, args: unknown): Promise<CallToolResult> {
-  const tool = arcTools[name];
+  const tool = allTools[name];
   if (!tool) {
     return {
       content: [

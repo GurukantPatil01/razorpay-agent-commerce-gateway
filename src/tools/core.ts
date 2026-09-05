@@ -335,5 +335,382 @@ export const arcTools: Record<string, CoreTool> = {
   },
 };
 
+// ─── Commerce & Razorpay Agent Tools ───
+import { getAllMerchants, getMerchantById } from '../data/merchants';
+import { searchProducts as findProducts, getProductById, products as allProducts } from '../data/products';
+import { calculateProductQuote, formatINR } from '../services/pricing/calculator';
+import { validatePurchasePolicy, DEFAULT_PURCHASE_POLICY, PurchasePolicy } from '../services/policy/engine';
+import { razorpayAdapter } from '../services/razorpay/adapter';
+import { CommerceStore } from '../lib/commerce-store';
+
+export const commerceTools: Record<string, CoreTool> = {
+  search_merchants: {
+    name: 'search_merchants',
+    description: 'Discover verified merchants on the Razorpay Agent Commerce Gateway with their ratings, delivery SLA, return policies, and Razorpay support.',
+    inputSchema: z.object({
+      query: z.string().optional().describe('Optional name or specialty keyword to filter merchants'),
+    }),
+    execute: async ({ query }: { query?: string }) => {
+      let list = getAllMerchants();
+      if (query) {
+        const q = query.toLowerCase();
+        list = list.filter((m) => m.name.toLowerCase().includes(q) || m.tagline.toLowerCase().includes(q));
+      }
+      return {
+        success: true,
+        count: list.length,
+        merchants: list.map((m) => ({
+          id: m.id,
+          name: m.name,
+          rating: m.rating,
+          standardDeliveryDays: m.standardDeliveryDays,
+          returnPolicyDays: m.returnPolicyDays,
+          returnPolicyDescription: m.returnPolicyDescription,
+          paymentProvider: m.paymentProvider,
+          agentPurchasesSupported: m.agentPurchasesSupported,
+        })),
+      };
+    },
+  },
+
+  search_products: {
+    name: 'search_products',
+    description: 'Search structured product catalog across all participating merchants. Returns products with base price, rating, delivery days, and return days.',
+    inputSchema: z.object({
+      query: z.string().describe('Search query e.g. "wireless keyboard"'),
+      category: z.string().optional().describe('Optional category filter e.g. "electronics"'),
+    }),
+    execute: async ({ query, category }: { query: string; category?: string }) => {
+      const results = findProducts(query, category);
+      return {
+        success: true,
+        count: results.length,
+        products: results.map((p) => {
+          const merchant = getMerchantById(p.merchantId);
+          return {
+            id: p.id,
+            name: p.name,
+            merchantId: p.merchantId,
+            merchantName: merchant?.name || p.merchantId,
+            category: p.category,
+            basePricePaise: p.basePricePaise,
+            basePriceFormatted: formatINR(p.basePricePaise),
+            taxPaise: p.taxPaise,
+            shippingFeePaise: p.shippingFeePaise,
+            deliveryDays: p.deliveryDays,
+            returnDays: p.returnDays,
+            rating: p.rating,
+            inStock: p.inStock,
+            specifications: p.specifications,
+          };
+        }),
+      };
+    },
+  },
+
+  get_product: {
+    name: 'get_product',
+    description: 'Get detailed product specifications, pricing breakdown, stock, and return policy for a specific product ID.',
+    inputSchema: z.object({
+      product_id: z.string().describe('Unique product ID e.g. "prod_acme_keyboard"'),
+    }),
+    execute: async ({ product_id }: { product_id: string }) => {
+      const product = getProductById(product_id);
+      if (!product) return { success: false, error: `Product ${product_id} not found` };
+      const merchant = getMerchantById(product.merchantId);
+      return {
+        success: true,
+        product: {
+          ...product,
+          merchantName: merchant?.name,
+          basePriceFormatted: formatINR(product.basePricePaise),
+        },
+      };
+    },
+  },
+
+  compare_products: {
+    name: 'compare_products',
+    description: 'Compare multiple candidate products side-by-side against user constraints (max budget, max delivery days, min return days). Explains which satisfies all rules.',
+    inputSchema: z.object({
+      product_ids: z.array(z.string()).describe('List of product IDs to compare'),
+      budget_paise: z.number().default(300000).describe('Max budget in paise (e.g. 300000 = ₹3,000)'),
+      max_delivery_days: z.number().default(3).describe('Max permitted delivery days'),
+      min_return_days: z.number().default(7).describe('Min permitted return days'),
+    }),
+    execute: async ({ product_ids, budget_paise, max_delivery_days, min_return_days }: any) => {
+      const comparisons = product_ids.map((id: string) => {
+        const prod = getProductById(id);
+        if (!prod) return { id, found: false };
+        const merchant = getMerchantById(prod.merchantId);
+        const quote = calculateProductQuote(prod, 1);
+
+        const meetsBudget = quote.finalTotalPaise <= budget_paise;
+        const meetsDelivery = prod.deliveryDays <= max_delivery_days;
+        const meetsReturn = prod.returnDays >= min_return_days;
+        const satisfiesAll = meetsBudget && meetsDelivery && meetsReturn;
+
+        const failureReasons: string[] = [];
+        if (!meetsBudget) failureReasons.push(`Exceeds budget: ${quote.formattedBreakdown.totalFormatted} > ${formatINR(budget_paise)}`);
+        if (!meetsDelivery) failureReasons.push(`Delivery too slow: ${prod.deliveryDays} days > ${max_delivery_days} days`);
+        if (!meetsReturn) failureReasons.push(`Return window too short: ${prod.returnDays} days < ${min_return_days} days`);
+
+        return {
+          productId: prod.id,
+          productName: prod.name,
+          merchantName: merchant?.name,
+          finalTotalFormatted: quote.formattedBreakdown.totalFormatted,
+          finalTotalPaise: quote.finalTotalPaise,
+          deliveryDays: prod.deliveryDays,
+          returnDays: prod.returnDays,
+          rating: prod.rating,
+          satisfiesAllConstraints: satisfiesAll,
+          failureReasons,
+        };
+      });
+
+      const bestCandidate = comparisons.find((c: any) => c.satisfiesAllConstraints);
+
+      return {
+        success: true,
+        comparisons,
+        recommendedProductId: bestCandidate?.productId || null,
+        recommendationSummary: bestCandidate
+          ? `Selected ${bestCandidate.productName} from ${bestCandidate.merchantName} (${bestCandidate.finalTotalFormatted}) as it satisfies all price, delivery, and return requirements.`
+          : 'No product satisfied 100% of the given constraints.',
+      };
+    },
+  },
+
+  calculate_total: {
+    name: 'calculate_total',
+    description: 'Compute exact deterministic quote server-side in paise (Base Price + Shipping + GST - Discounts). LLM must never calculate amounts directly.',
+    inputSchema: z.object({
+      product_id: z.string().describe('Product ID'),
+      quantity: z.number().default(1).describe('Quantity to purchase'),
+      discount_code: z.string().optional().describe('Optional discount code'),
+    }),
+    execute: async ({ product_id, quantity, discount_code }: any) => {
+      const product = getProductById(product_id);
+      if (!product) return { success: false, error: `Product ${product_id} not found` };
+      const quote = calculateProductQuote(product, quantity, discount_code);
+      return {
+        success: true,
+        quote,
+      };
+    },
+  },
+
+  check_purchase_policy: {
+    name: 'check_purchase_policy',
+    description: 'Verify if a product purchase complies with the buyer spending policy (max amount, permitted categories, merchant checks, delivery & return thresholds).',
+    inputSchema: z.object({
+      product_id: z.string().describe('Product ID'),
+      quantity: z.number().default(1).describe('Quantity'),
+    }),
+    execute: async ({ product_id, quantity }: any) => {
+      const product = getProductById(product_id);
+      if (!product) return { success: false, error: `Product ${product_id} not found` };
+      const quote = calculateProductQuote(product, quantity);
+      const policyResult = validatePurchasePolicy(quote, DEFAULT_PURCHASE_POLICY);
+      return {
+        success: true,
+        policyResult,
+        quote,
+      };
+    },
+  },
+
+  create_purchase_request: {
+    name: 'create_purchase_request',
+    description: 'Generate an AI purchase request and human approval card for the selected product. Mandatory before any Razorpay order can be created.',
+    inputSchema: z.object({
+      product_id: z.string().describe('Product ID'),
+      quantity: z.number().default(1).describe('Quantity'),
+      selection_reason: z.string().describe('Explanation of why this product was chosen over alternatives based on constraints'),
+    }),
+    execute: async ({ product_id, quantity, selection_reason }: any) => {
+      const product = getProductById(product_id);
+      if (!product) return { success: false, error: `Product ${product_id} not found` };
+
+      const quote = calculateProductQuote(product, quantity);
+      const policyResult = validatePurchasePolicy(quote, DEFAULT_PURCHASE_POLICY);
+
+      if (!policyResult.allowed) {
+        return {
+          success: false,
+          error: `Purchase blocked by policy: ${policyResult.violations.join('; ')}`,
+          violations: policyResult.violations,
+        };
+      }
+
+      const purchaseRequest = CommerceStore.createPurchaseRequest({
+        merchantId: product.merchantId,
+        productId: product.id,
+        quantity,
+        quote,
+        policyResult,
+        selectionReason: selection_reason,
+      });
+
+      return {
+        success: true,
+        purchaseRequestId: purchaseRequest.id,
+        approvalRequired: policyResult.requiresApproval,
+        approvalCard: {
+          purchaseRequestId: purchaseRequest.id,
+          productName: product.name,
+          merchantName: getMerchantById(product.merchantId)?.name,
+          basePriceFormatted: quote.formattedBreakdown.basePriceFormatted,
+          shippingFormatted: quote.formattedBreakdown.shippingFormatted,
+          taxFormatted: quote.formattedBreakdown.taxFormatted,
+          discountFormatted: quote.formattedBreakdown.discountFormatted,
+          totalFormatted: quote.formattedBreakdown.totalFormatted,
+          totalPaise: quote.finalTotalPaise,
+          budgetFormatted: formatINR(DEFAULT_PURCHASE_POLICY.max_amount),
+          remainingBudgetFormatted: formatINR(DEFAULT_PURCHASE_POLICY.max_amount - quote.finalTotalPaise),
+          deliveryEstimate: `${product.deliveryDays} Days`,
+          returnPolicy: `${product.returnDays} Days Return Policy`,
+          whySelected: selection_reason,
+          quoteHash: quote.quoteHash,
+        },
+      };
+    },
+  },
+
+  create_razorpay_order: {
+    name: 'create_razorpay_order',
+    description: 'Create a Razorpay Order for an approved purchase request. Requires explicit human approval first.',
+    inputSchema: z.object({
+      purchase_request_id: z.string().describe('Purchase request ID (e.g. req_...)'),
+    }),
+    execute: async ({ purchase_request_id }: { purchase_request_id: string }) => {
+      const request = CommerceStore.getPurchaseRequest(purchase_request_id);
+      if (!request) return { success: false, error: `Request ${purchase_request_id} not found` };
+      if (request.approvalStatus !== 'APPROVED') {
+        return {
+          success: false,
+          error: `Cannot create Razorpay Order: Approval status is '${request.approvalStatus}'. Human approval is required first.`,
+        };
+      }
+
+      // Create transaction
+      const transaction = CommerceStore.createTransaction({
+        purchaseRequestId: request.id,
+      });
+
+      // Call Razorpay Adapter to create order
+      const razorpayOrder = await razorpayAdapter.createOrder({
+        amountPaise: transaction.amountPaise,
+        currency: 'INR',
+        receipt: transaction.transactionId,
+        notes: {
+          transactionId: transaction.transactionId,
+          productId: transaction.productId,
+          merchantId: transaction.merchantId,
+        },
+      });
+
+      // Attach Razorpay Order to transaction
+      CommerceStore.attachRazorpayOrder(transaction.transactionId, razorpayOrder.id, razorpayOrder.mode);
+
+      return {
+        success: true,
+        transactionId: transaction.transactionId,
+        razorpayOrderId: razorpayOrder.id,
+        amountPaise: razorpayOrder.amount,
+        amountFormatted: formatINR(razorpayOrder.amount),
+        mode: razorpayOrder.mode,
+        status: razorpayOrder.status,
+      };
+    },
+  },
+
+  verify_payment: {
+    name: 'verify_payment',
+    description: 'Deterministically verify Razorpay payment signature and fulfill merchant order. Agent is not allowed to declare payment success without this check.',
+    inputSchema: z.object({
+      transaction_id: z.string().describe('Transaction ID (tx_...)'),
+      payment_id: z.string().describe('Razorpay payment ID (pay_... or sim_pay_...)'),
+      signature: z.string().describe('Razorpay payment signature'),
+      payment_method: z.string().default('card').describe('Payment method used e.g. card, upi'),
+    }),
+    execute: async ({ transaction_id, payment_id, signature, payment_method }: any) => {
+      const tx = CommerceStore.getTransaction(transaction_id);
+      if (!tx) return { success: false, error: `Transaction ${transaction_id} not found` };
+      if (!tx.razorpayOrderId) return { success: false, error: 'Transaction has no associated Razorpay Order' };
+
+      // Deterministic signature check via Razorpay Adapter
+      const verification = razorpayAdapter.verifyPaymentSignature({
+        orderId: tx.razorpayOrderId,
+        paymentId: payment_id,
+        signature,
+      });
+
+      if (!verification.isValid) {
+        CommerceStore.recordPaymentAttempt({
+          transactionId: transaction_id,
+          paymentId: payment_id,
+          method: payment_method,
+          status: 'FAILED',
+          errorDescription: verification.error || 'Payment signature mismatch',
+        });
+        return {
+          success: false,
+          verified: false,
+          error: 'Razorpay payment signature verification failed. Fulfillment aborted.',
+        };
+      }
+
+      // Record successful payment
+      CommerceStore.recordPaymentAttempt({
+        transactionId: transaction_id,
+        paymentId: payment_id,
+        method: payment_method,
+        status: 'SUCCESS',
+        signature,
+      });
+
+      // Execute fulfillment
+      const fulfilledTx = CommerceStore.fulfillTransaction(transaction_id);
+
+      return {
+        success: true,
+        verified: true,
+        mode: verification.mode,
+        transactionId: transaction_id,
+        razorpayOrderId: tx.razorpayOrderId,
+        razorpayPaymentId: payment_id,
+        state: fulfilledTx.state,
+        fulfillmentTrackingNumber: fulfilledTx.fulfillmentTrackingNumber,
+        message: 'Payment verified and merchant order fulfilled successfully.',
+      };
+    },
+  },
+
+  get_order_status: {
+    name: 'get_order_status',
+    description: 'Fetch real-time transaction state, Razorpay identifiers, and fulfillment status for a given transaction.',
+    inputSchema: z.object({
+      transaction_id: z.string().describe('Transaction ID'),
+    }),
+    execute: async ({ transaction_id }: { transaction_id: string }) => {
+      const tx = CommerceStore.getTransaction(transaction_id);
+      if (!tx) return { success: false, error: `Transaction ${transaction_id} not found` };
+      return {
+        success: true,
+        transaction: tx,
+      };
+    },
+  },
+};
+
+// All tools combined
+export const allTools: Record<string, CoreTool> = {
+  ...arcTools,
+  ...commerceTools,
+};
+
 // Type helpers
 export type ArcToolName = keyof typeof arcTools;
+export type CommerceToolName = keyof typeof commerceTools;

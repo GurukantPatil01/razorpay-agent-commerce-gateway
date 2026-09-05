@@ -336,22 +336,58 @@ export const arcTools: Record<string, CoreTool> = {
 };
 
 // ─── Commerce & Razorpay Agent Tools ───
-import { getAllMerchants, getMerchantById } from '../data/merchants';
+// ─── Commerce & Razorpay Agent Tools ───
+import { getAllMerchants, getMerchantById, getMerchantCapabilityDocument } from '../data/merchants';
 import { searchProducts as findProducts, getProductById, products as allProducts } from '../data/products';
 import { calculateProductQuote, formatINR } from '../services/pricing/calculator';
 import { validatePurchasePolicy, DEFAULT_PURCHASE_POLICY, PurchasePolicy } from '../services/policy/engine';
 import { razorpayAdapter } from '../services/razorpay/adapter';
 import { CommerceStore } from '../lib/commerce-store';
+import { rankCandidates, scoreProduct } from '../services/ranking/scoring-engine';
+import { createPurchasePlan } from '../services/pricing/purchase-plan';
+import { PurchaseIntent } from '../services/intent/parser';
 
 export const commerceTools: Record<string, CoreTool> = {
+  discover_merchants: {
+    name: 'discover_merchants',
+    description: 'Discover verified merchants on the Razorpay Agent Commerce Gateway with capability filtering (agent-checkout and Razorpay support).',
+    inputSchema: z.object({
+      query: z.string().optional().describe('Optional name or keyword filter'),
+      requires_agent_checkout: z.boolean().default(true).describe('Filter for merchants supporting autonomous agent checkout'),
+      requires_razorpay: z.boolean().default(true).describe('Filter for merchants with native Razorpay payment capability'),
+    }),
+    execute: async ({ query, requires_agent_checkout = true, requires_razorpay = true }: any) => {
+      let list = getAllMerchants();
+
+      // Apply hard compatibility filters
+      if (requires_agent_checkout) {
+        list = list.filter((m) => m.agentPurchasesSupported);
+      }
+      if (requires_razorpay) {
+        list = list.filter((m) => m.paymentProvider === 'razorpay');
+      }
+
+      if (query) {
+        const q = query.toLowerCase();
+        list = list.filter((m) => m.name.toLowerCase().includes(q) || m.tagline.toLowerCase().includes(q));
+      }
+
+      return {
+        success: true,
+        count: list.length,
+        merchants: list.map((m) => getMerchantCapabilityDocument(m.id)),
+      };
+    },
+  },
+
   search_merchants: {
     name: 'search_merchants',
-    description: 'Discover verified merchants on the Razorpay Agent Commerce Gateway with their ratings, delivery SLA, return policies, and Razorpay support.',
+    description: 'Legacy alias for discover_merchants to maintain backwards compatibility.',
     inputSchema: z.object({
       query: z.string().optional().describe('Optional name or specialty keyword to filter merchants'),
     }),
     execute: async ({ query }: { query?: string }) => {
-      let list = getAllMerchants();
+      let list = getAllMerchants().filter((m) => m.agentPurchasesSupported && m.paymentProvider === 'razorpay');
       if (query) {
         const q = query.toLowerCase();
         list = list.filter((m) => m.name.toLowerCase().includes(q) || m.tagline.toLowerCase().includes(q));
@@ -360,14 +396,8 @@ export const commerceTools: Record<string, CoreTool> = {
         success: true,
         count: list.length,
         merchants: list.map((m) => ({
-          id: m.id,
-          name: m.name,
-          rating: m.rating,
-          standardDeliveryDays: m.standardDeliveryDays,
-          returnPolicyDays: m.returnPolicyDays,
-          returnPolicyDescription: m.returnPolicyDescription,
-          paymentProvider: m.paymentProvider,
-          agentPurchasesSupported: m.agentPurchasesSupported,
+          ...m,
+          capabilityDoc: getMerchantCapabilityDocument(m.id),
         })),
       };
     },
@@ -375,13 +405,34 @@ export const commerceTools: Record<string, CoreTool> = {
 
   search_products: {
     name: 'search_products',
-    description: 'Search structured product catalog across all participating merchants. Returns products with base price, rating, delivery days, and return days.',
+    description: 'Search structured product catalog across compatible merchants with optional hard constraints (budget, max delivery days, min return days).',
     inputSchema: z.object({
       query: z.string().describe('Search query e.g. "wireless keyboard"'),
       category: z.string().optional().describe('Optional category filter e.g. "electronics"'),
+      max_price_paise: z.number().optional().describe('Optional max price in paise (e.g. 300000 = ₹3,000)'),
+      max_delivery_days: z.number().optional().describe('Optional max delivery days'),
+      min_return_days: z.number().optional().describe('Optional minimum return policy days'),
     }),
-    execute: async ({ query, category }: { query: string; category?: string }) => {
-      const results = findProducts(query, category);
+    execute: async ({ query, category, max_price_paise, max_delivery_days, min_return_days }: any) => {
+      let results = findProducts(query, category);
+
+      // Hard filter: only products from agent-compatible and Razorpay-supported merchants
+      results = results.filter((p) => {
+        const m = getMerchantById(p.merchantId);
+        return m && m.agentPurchasesSupported && m.paymentProvider === 'razorpay';
+      });
+
+      // Optional constraint filtering (only when specified)
+      if (max_price_paise !== undefined && max_price_paise !== null) {
+        results = results.filter((p) => (p.basePricePaise + p.taxPaise + p.shippingFeePaise) <= max_price_paise);
+      }
+      if (max_delivery_days !== undefined && max_delivery_days !== null) {
+        results = results.filter((p) => p.deliveryDays <= max_delivery_days);
+      }
+      if (min_return_days !== undefined && min_return_days !== null) {
+        results = results.filter((p) => p.returnDays >= min_return_days);
+      }
+
       return {
         success: true,
         count: results.length,
@@ -431,53 +482,74 @@ export const commerceTools: Record<string, CoreTool> = {
 
   compare_products: {
     name: 'compare_products',
-    description: 'Compare multiple candidate products side-by-side against user constraints (max budget, max delivery days, min return days). Explains which satisfies all rules.',
+    description: 'Compare candidate products deterministically using the multi-factor scoring engine (price 30%, delivery 20%, returns 15%, rating 15%, inventory 10%, agent 5%, Razorpay 5%).',
     inputSchema: z.object({
       product_ids: z.array(z.string()).describe('List of product IDs to compare'),
-      budget_paise: z.number().default(300000).describe('Max budget in paise (e.g. 300000 = ₹3,000)'),
-      max_delivery_days: z.number().default(3).describe('Max permitted delivery days'),
-      min_return_days: z.number().default(7).describe('Min permitted return days'),
+      budget_paise: z.number().optional().describe('Max budget in paise (e.g. 300000 = ₹3,000)'),
+      max_delivery_days: z.number().optional().describe('Max permitted delivery days'),
+      min_return_days: z.number().optional().describe('Min permitted return days'),
     }),
     execute: async ({ product_ids, budget_paise, max_delivery_days, min_return_days }: any) => {
-      const comparisons = product_ids.map((id: string) => {
-        const prod = getProductById(id);
-        if (!prod) return { id, found: false };
-        const merchant = getMerchantById(prod.merchantId);
-        const quote = calculateProductQuote(prod, 1);
+      const candidates = product_ids
+        .map((id: string) => getProductById(id))
+        .filter((p: any): p is NonNullable<typeof p> => Boolean(p));
 
-        const meetsBudget = quote.finalTotalPaise <= budget_paise;
-        const meetsDelivery = prod.deliveryDays <= max_delivery_days;
-        const meetsReturn = prod.returnDays >= min_return_days;
-        const satisfiesAll = meetsBudget && meetsDelivery && meetsReturn;
+      const intent: PurchaseIntent = {
+        query: 'comparison',
+        category: 'electronics',
+        maxAmountPaise: budget_paise ?? null,
+        currency: 'INR',
+        maxDeliveryDays: max_delivery_days ?? null,
+        minimumReturnDays: min_return_days ?? null,
+        requiresAgentCheckout: true,
+        requiresRazorpay: true,
+      };
 
-        const failureReasons: string[] = [];
-        if (!meetsBudget) failureReasons.push(`Exceeds budget: ${quote.formattedBreakdown.totalFormatted} > ${formatINR(budget_paise)}`);
-        if (!meetsDelivery) failureReasons.push(`Delivery too slow: ${prod.deliveryDays} days > ${max_delivery_days} days`);
-        if (!meetsReturn) failureReasons.push(`Return window too short: ${prod.returnDays} days < ${min_return_days} days`);
+      const ranking = rankCandidates(candidates, intent);
 
-        return {
-          productId: prod.id,
-          productName: prod.name,
-          merchantName: merchant?.name,
-          finalTotalFormatted: quote.formattedBreakdown.totalFormatted,
-          finalTotalPaise: quote.finalTotalPaise,
-          deliveryDays: prod.deliveryDays,
-          returnDays: prod.returnDays,
-          rating: prod.rating,
-          satisfiesAllConstraints: satisfiesAll,
-          failureReasons,
-        };
-      });
-
-      const bestCandidate = comparisons.find((c: any) => c.satisfiesAllConstraints);
+      const candidateDetails = ranking.candidates.map((c) => ({
+        productId: c.product.id,
+        productName: c.product.name,
+        merchantId: c.merchant.id,
+        merchantName: c.merchant.name,
+        basePricePaise: c.quote.baseSubtotalPaise,
+        shippingPaise: c.quote.shippingTotalPaise,
+        taxPaise: c.quote.taxTotalPaise,
+        finalTotalPaise: c.quote.finalTotalPaise,
+        finalTotalFormatted: c.quote.formattedBreakdown.totalFormatted,
+        totalPaise: c.quote.finalTotalPaise,
+        totalFormatted: c.quote.formattedBreakdown.totalFormatted,
+        deliveryDays: c.product.deliveryDays,
+        returnDays: c.product.returnDays,
+        rating: c.product.rating,
+        score: c.score,
+        breakdown: c.breakdown,
+        reasons: c.reasons,
+        qualifies: c.qualifies,
+        satisfiesAllConstraints: c.qualifies,
+        failureReasons: c.hardFilterViolations,
+      }));
 
       return {
         success: true,
-        comparisons,
-        recommendedProductId: bestCandidate?.productId || null,
-        recommendationSummary: bestCandidate
-          ? `Selected ${bestCandidate.productName} from ${bestCandidate.merchantName} (${bestCandidate.finalTotalFormatted}) as it satisfies all price, delivery, and return requirements.`
-          : 'No product satisfied 100% of the given constraints.',
+        status: ranking.status,
+        summary: ranking.summary,
+        recommendationSummary: ranking.summary,
+        recommendedProductId: ranking.winner?.product.id || null,
+        recommendedProductName: ranking.winner?.product.name || null,
+        recommendedMerchantName: ranking.winner?.merchant.name || null,
+        winnerScore: ranking.winner?.score || null,
+        winnerBreakdown: ranking.winner?.breakdown || null,
+        winnerReasons: ranking.winner?.reasons || [],
+        candidates: candidateDetails,
+        comparisons: candidateDetails,
+        nearMatches: ranking.nearMatches.map((c) => ({
+          productId: c.product.id,
+          productName: c.product.name,
+          merchantName: c.merchant.name,
+          totalFormatted: c.quote.formattedBreakdown.totalFormatted,
+          violations: c.hardFilterViolations,
+        })),
       };
     },
   },
@@ -523,15 +595,17 @@ export const commerceTools: Record<string, CoreTool> = {
 
   create_purchase_request: {
     name: 'create_purchase_request',
-    description: 'Generate an AI purchase request and human approval card for the selected product. Mandatory before any Razorpay order can be created.',
+    description: 'Generate an immutable AI purchase plan and human approval card for the selected product. Mandatory before any Razorpay order can be created.',
     inputSchema: z.object({
       product_id: z.string().describe('Product ID'),
       quantity: z.number().default(1).describe('Quantity'),
       selection_reason: z.string().describe('Explanation of why this product was chosen over alternatives based on constraints'),
     }),
-    execute: async ({ product_id, quantity, selection_reason }: any) => {
+    execute: async ({ product_id, quantity = 1, selection_reason }: any) => {
       const product = getProductById(product_id);
       if (!product) return { success: false, error: `Product ${product_id} not found` };
+      const merchant = getMerchantById(product.merchantId);
+      if (!merchant) return { success: false, error: `Merchant ${product.merchantId} not found` };
 
       const quote = calculateProductQuote(product, quantity);
       const policyResult = validatePurchasePolicy(quote, DEFAULT_PURCHASE_POLICY);
@@ -543,6 +617,27 @@ export const commerceTools: Record<string, CoreTool> = {
           violations: policyResult.violations,
         };
       }
+
+      // Compute deterministic score and component breakdown
+      const scored = scoreProduct(product, merchant, quote, {
+        query: product.name,
+        category: product.category,
+        maxAmountPaise: DEFAULT_PURCHASE_POLICY.max_amount,
+        currency: 'INR',
+        maxDeliveryDays: 3,
+        minimumReturnDays: 7,
+        requiresAgentCheckout: true,
+        requiresRazorpay: true,
+      });
+
+      // Create frozen purchase plan
+      const plan = createPurchasePlan({
+        product,
+        merchant,
+        quantity,
+        score: scored.score,
+        reasons: scored.reasons,
+      });
 
       const purchaseRequest = CommerceStore.createPurchaseRequest({
         merchantId: product.merchantId,
@@ -556,11 +651,13 @@ export const commerceTools: Record<string, CoreTool> = {
       return {
         success: true,
         purchaseRequestId: purchaseRequest.id,
+        purchasePlanId: plan.id,
         approvalRequired: policyResult.requiresApproval,
         approvalCard: {
           purchaseRequestId: purchaseRequest.id,
+          purchasePlanId: plan.id,
           productName: product.name,
-          merchantName: getMerchantById(product.merchantId)?.name,
+          merchantName: merchant.name,
           basePriceFormatted: quote.formattedBreakdown.basePriceFormatted,
           shippingFormatted: quote.formattedBreakdown.shippingFormatted,
           taxFormatted: quote.formattedBreakdown.taxFormatted,
@@ -571,6 +668,9 @@ export const commerceTools: Record<string, CoreTool> = {
           remainingBudgetFormatted: formatINR(DEFAULT_PURCHASE_POLICY.max_amount - quote.finalTotalPaise),
           deliveryEstimate: `${product.deliveryDays} Days`,
           returnPolicy: `${product.returnDays} Days Return Policy`,
+          aiScore: scored.score,
+          scoreBreakdown: scored.breakdown,
+          verifiedReasons: scored.reasons,
           whySelected: selection_reason,
           quoteHash: quote.quoteHash,
         },

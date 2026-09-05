@@ -49,6 +49,7 @@ export interface PricingQuote {
   calculatedAt: number;
   quoteHash: string;            // Deterministic fingerprint of price parameters
 }
+export type ProductQuote = PricingQuote;
 
 /**
  * Format integer paise into Indian Rupee string (e.g. ₹2,949.00)

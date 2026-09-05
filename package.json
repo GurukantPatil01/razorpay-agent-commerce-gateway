@@ -16,6 +16,7 @@
     "test:commerce": "tsx scripts/test-phase1-commerce.ts",
     "test:acceptance": "tsx scripts/test-acceptance-flow.ts",
     "test:reliability": "tsx scripts/test-phase2-reliability.ts",
+    "test:agent-commerce": "tsx scripts/test-phase3-agent-commerce.ts",
     "verify:razorpay": "tsx scripts/verify-real-razorpay-testmode.ts",
     "typecheck": "tsc --noEmit"
   },

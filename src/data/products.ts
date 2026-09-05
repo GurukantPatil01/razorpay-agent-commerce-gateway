@@ -110,7 +110,7 @@ export const products: Product[] = [
     merchantId: 'merchant_nova',
     name: 'Nova Apex RGB Wireless Keyboard',
     category: 'electronics',
-    description: 'Flagship mechanical keyboard with PBT keycaps, gasket-mounted sound dampening, and rapid-trigger magnetic switches.',
+    description: 'Flagship mechanical keyboard with rapid 1-day express delivery, PBT keycaps, and magnetic switches.',
     specifications: {
       connectivity: 'Tri-mode Wireless + BT 5.3 + Type-C',
       batteryLife: '300 Hours',
@@ -118,17 +118,17 @@ export const products: Product[] = [
       backlight: 'Per-key ARGB',
       compatibility: 'Windows, macOS, iOS, Android',
     },
-    basePricePaise: 260000,   // ₹2,600.00
+    basePricePaise: 262600,   // ₹2,626.00
     gstRate: 0.18,
-    taxPaise: 40000,          // ₹400.00
-    shippingFeePaise: 9900,   // ₹99.00
+    taxPaise: 47300,          // ₹473.00
+    shippingFeePaise: 0,
     discountPaise: 0,
-    inventory: 18,
-    deliveryDays: 2,          // Satisfies 2 days
+    inventory: 25,
+    deliveryDays: 2,
     returnDays: 7,
     rating: 4.9,
     reviewCount: 430,
-    inStock: true,            // Total = ₹3,099 (Fails budget constraint: > ₹3,000)
+    inStock: true,            // Total = ₹3,099 (Exceeds ₹3,000 budget)
   },
 
   // ── TechNest ──
@@ -156,7 +156,84 @@ export const products: Product[] = [
     reviewCount: 95,
     inStock: true,            // Total = ₹3,184 (Fails budget constraint: > ₹3,000)
   },
+
+  // ── Legacy Mart (Non-Agent Merchant Test Case) ──
+  {
+    id: 'prod_legacy_keyboard',
+    merchantId: 'merchant_legacy',
+    name: 'Legacy Standard Keyboard (In-Store Only)',
+    category: 'electronics',
+    description: 'Reliable office mechanical and wireless keyboard sold by traditional retailer without autonomous agent API support.',
+    specifications: {
+      connectivity: 'USB / Wireless',
+      switchType: 'Blue Mechanical',
+    },
+    basePricePaise: 194800,   // ₹1,948.00
+    gstRate: 0.18,
+    taxPaise: 35100,          // ₹351.00
+    shippingFeePaise: 0,
+    discountPaise: 0,
+    inventory: 50,
+    deliveryDays: 2,
+    returnDays: 7,
+    rating: 4.9,
+    reviewCount: 410,
+    inStock: true,            // Total = ₹2,299
+  },
+
+  // ── Global Goods (Non-Razorpay Merchant Test Case) ──
+  {
+    id: 'prod_stripe_keyboard',
+    merchantId: 'merchant_global',
+    name: 'Global Goods CyberKey Wireless Keyboard',
+    category: 'electronics',
+    description: 'International compact wireless keyboard from a merchant without Razorpay gateway integration.',
+    specifications: {
+      connectivity: 'Bluetooth 5.0',
+      switchType: 'Scissor Switch',
+    },
+    basePricePaise: 186300,   // ₹1,863.00
+    gstRate: 0.18,
+    taxPaise: 33600,          // ₹336.00
+    shippingFeePaise: 0,
+    discountPaise: 0,
+    inventory: 80,
+    deliveryDays: 1,
+    returnDays: 14,
+    rating: 4.8,
+    reviewCount: 520,
+    inStock: true,            // Total = ₹2,199
+  },
 ];
+
+// Snapshot of initial baseline prices for clean test mutations
+const defaultProductPrices: Record<string, { basePricePaise: number; taxPaise: number }> = {
+  prod_acme_keyboard: { basePricePaise: 249900, taxPaise: 45000 },
+  prod_qg_keyboard: { basePricePaise: 235000, taxPaise: 40000 },
+  prod_nova_keyboard: { basePricePaise: 262600, taxPaise: 47300 },
+  prod_technest_keyboard: { basePricePaise: 269900, taxPaise: 48500 },
+};
+
+/**
+ * Mutates a product price in the live catalog.
+ * Used for Demo 4 (Price Change Protection) and dynamic pricing tests.
+ */
+export function mutateProductPrice(productId: string, newBasePricePaise: number, newTaxPaise?: number): Product {
+  const prod = products.find((p) => p.id === productId);
+  if (!prod) throw new Error(`Product ${productId} not found`);
+  prod.basePricePaise = newBasePricePaise;
+  prod.taxPaise = newTaxPaise ?? Math.round(newBasePricePaise * prod.gstRate);
+  return prod;
+}
+
+/**
+ * Resets a product price back to its original baseline.
+ */
+export function resetProductPrice(productId: string): Product {
+  const defaults = defaultProductPrices[productId];
+  if (!defaults) return getProductById(productId)!;
+  return mutateProductPrice(productId, defaults.basePricePaise, defaults.taxPaise);
+}
 
 export function getProductById(id: string): Product | undefined {
   return products.find((p) => p.id === id);
@@ -168,14 +245,13 @@ export function getProductsByMerchant(merchantId: string): Product[] {
 
 export function searchProducts(query: string, category?: string): Product[] {
   const q = query.toLowerCase().trim();
+  const words = q.split(/\s+/).filter(Boolean);
   return products.filter((p) => {
     const matchesCategory = category ? p.category.toLowerCase() === category.toLowerCase() : true;
-    const matchesQuery =
-      q === '' ||
-      p.name.toLowerCase().includes(q) ||
-      p.description.toLowerCase().includes(q) ||
-      p.category.toLowerCase().includes(q) ||
-      Object.values(p.specifications).some((val) => val.toLowerCase().includes(q));
-    return matchesCategory && matchesQuery;
+    if (!matchesCategory) return false;
+    if (words.length === 0) return true;
+
+    const targetText = `${p.name} ${p.description} ${p.category} ${Object.values(p.specifications).join(' ')}`.toLowerCase();
+    return words.every((w) => targetText.includes(w));
   });
 }

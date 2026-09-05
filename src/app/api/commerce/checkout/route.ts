@@ -80,6 +80,17 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('Checkout error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    if (err.message && err.message.includes('PRICE_CHANGE_DETECTED')) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'PRICE_CHANGE_DETECTED',
+          message: err.message,
+          razorpayOrderCreated: false,
+        },
+        { status: 409 }
+      );
+    }
+    return NextResponse.json({ success: false, error: err.message, razorpayOrderCreated: false }, { status: 500 });
   }
 }

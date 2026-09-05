@@ -5,7 +5,8 @@
  * across Next.js hot module reloads via globalThis.
  */
 
-import { PricingQuote, formatINR } from '@/services/pricing/calculator';
+import { PricingQuote, calculateProductQuote, formatINR } from '@/services/pricing/calculator';
+import { getProductById } from '@/data/products';
 import { PolicyValidationResult } from '@/services/policy/engine';
 import { TransactionState, TransactionStateMachine, StateTransitionRecord } from '@/services/transactions/state-machine';
 import { razorpayAdapter } from '@/services/razorpay/adapter';
@@ -242,6 +243,27 @@ export class CommerceStore {
 
     if (request.approvalStatus !== 'APPROVED') {
       throw new Error(`Cannot initiate checkout: Purchase request status is ${request.approvalStatus}. Approval required.`);
+    }
+
+    // Last-moment price check: verify catalog price has not mutated since approval
+    const currentProduct = getProductById(request.productId);
+    if (!currentProduct) {
+      throw new Error(`Product ${request.productId} is no longer available in the merchant catalog.`);
+    }
+
+    const freshQuote = calculateProductQuote(currentProduct, request.quantity);
+    if (freshQuote.quoteHash !== request.quoteHash) {
+      CommerceStore.recordAuditEvent({
+        actor: 'POLICY_ENGINE',
+        action: 'PLAN_INVALIDATED',
+        merchantId: request.merchantId,
+        productName: request.quote.lineItems[0]?.name || request.productId,
+        result: 'BLOCKED',
+        details: `PRICE_CHANGE_DETECTED: Price changed from ${request.quote.formattedBreakdown.totalFormatted} to ${freshQuote.formattedBreakdown.totalFormatted}. Quote hash mismatch. Stale plan invalidated. Razorpay order blocked.`,
+      });
+      throw new Error(
+        `PRICE_CHANGE_DETECTED: Price changed from ${request.quote.formattedBreakdown.totalFormatted} to ${freshQuote.formattedBreakdown.totalFormatted}. Quote hash mismatch. Purchase blocked by policy.`
+      );
     }
 
     const idempotencyKey = params.idempotencyKey || `idem_${request.id}_${request.quoteHash}`;

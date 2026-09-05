@@ -1,9 +1,20 @@
-import { NextResponse } from 'next/server';
-import { getAllMerchants } from '@/data/merchants';
+import { NextRequest, NextResponse } from 'next/server';
+import { getAllMerchants, getMerchantCapabilityDocument } from '@/data/merchants';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const merchantId = searchParams.get('merchantId') || searchParams.get('merchant');
+
+  if (merchantId) {
+    const doc = getMerchantCapabilityDocument(merchantId);
+    if (!doc) {
+      return NextResponse.json({ error: `Merchant '${merchantId}' not found.` }, { status: 404 });
+    }
+    return NextResponse.json(doc);
+  }
+
   const merchants = getAllMerchants();
 
   return NextResponse.json({
@@ -12,6 +23,7 @@ export async function GET() {
       version: '1.0.0',
       description: 'Standard machine-readable discovery and execution protocol for AI buyers',
     },
+    thesis: 'AI proposes. Backend validates. Razorpay executes.',
     payment_provider: 'razorpay',
     currency: 'INR',
     smallest_unit: 'paise',
@@ -28,16 +40,8 @@ export async function GET() {
       'idempotent_fulfillment',
       'failure_recovery',
       'immutable_audit_log',
+      'agent_purchase',
     ],
-    merchants: merchants.map((m) => ({
-      id: m.id,
-      name: m.name,
-      rating: m.rating,
-      standardDeliveryDays: m.standardDeliveryDays,
-      returnPolicyDays: m.returnPolicyDays,
-      supportedCurrencies: m.supportedCurrencies,
-      paymentProvider: m.paymentProvider,
-      agentPurchases: m.agentPurchasesSupported,
-    })),
+    merchants: merchants.map((m) => getMerchantCapabilityDocument(m.id)),
   });
 }
